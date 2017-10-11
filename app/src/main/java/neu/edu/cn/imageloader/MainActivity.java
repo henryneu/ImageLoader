@@ -1,10 +1,16 @@
 package neu.edu.cn.imageloader;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Bundle;
 import android.support.v7.app.AppCompatActivity;
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.BaseAdapter;
 import android.widget.GridView;
 import android.widget.ImageView;
@@ -18,20 +24,29 @@ public class MainActivity extends AppCompatActivity {
 
     private List<String> mImageUrlList;
 
+    private ImageLoader mImageLoader;
+
+    private boolean mCanGetBitmapFromNetWork = false;
+
+    private boolean mIsGridViewIdle = true;
+
+    private int mImageWidth;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        mImageUrlList = new ArrayList<>();
         initData();
         mGridView = (GridView) findViewById(R.id.image_load_view);
         mGridView.setAdapter(new MyGridViewAdapter());
+        mImageLoader = ImageLoader.build(MainActivity.this);
     }
 
     /**
      * 初始化数据
      */
     private void initData() {
+        mImageUrlList = new ArrayList<String>();
         String[] imageUrls = {
                 "http://img.my.csdn.net/uploads/201407/26/1406383299_1976.jpg",
                 "http://img.my.csdn.net/uploads/201407/26/1406383291_6518.jpg",
@@ -122,6 +137,15 @@ public class MainActivity extends AppCompatActivity {
         for (String url : imageUrls) {
             mImageUrlList.add(url);
         }
+        WindowManager wm = (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
+        DisplayMetrics dm = new DisplayMetrics();
+        wm.getDefaultDisplay().getMetrics(dm);
+        // 获取屏幕的宽度
+        int screenWidth = dm.widthPixels;
+        int space = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 20f,
+                getApplicationContext().getResources().getDisplayMetrics());
+        mImageWidth = (screenWidth - space) / 3;
+        mCanGetBitmapFromNetWork = isWifi(this);
     }
 
     class MyGridViewAdapter extends BaseAdapter {
@@ -154,12 +178,32 @@ public class MainActivity extends AppCompatActivity {
             }
             ImageView imageView = holder.imageView;
             final String url = getItem(position);
-            imageView.setImageDrawable(getApplicationContext().getResources().getDrawable(R.drawable.img_default));
+            final String tag = (String) imageView.getTag();
+            if (!url.equals(tag)) {
+                imageView.setImageDrawable(getApplicationContext().getResources().getDrawable(R.drawable.img_default));
+            }
+            if (mIsGridViewIdle && mCanGetBitmapFromNetWork) {
+                imageView.setTag(url);
+                mImageLoader.bindBitmap(url, imageView, mImageWidth, mImageWidth);
+            }
             return convertView;
         }
     }
 
     class ViewHolder {
         ImageView imageView;
+    }
+
+    /**
+     * @param context 上下文环境
+     * @return WiFi是否打开，打开返回true
+     */
+    public static boolean isWifi(Context context) {
+        ConnectivityManager connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
+        if (networkInfo != null && networkInfo.getType() == ConnectivityManager.TYPE_WIFI) {
+            return true;
+        }
+        return false;
     }
 }

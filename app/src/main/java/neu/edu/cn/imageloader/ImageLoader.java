@@ -5,10 +5,16 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
 import android.os.StatFs;
+import android.support.annotation.NonNull;
 import android.support.v4.util.LruCache;
+import android.util.Log;
 import android.widget.ImageView;
 
 import com.jakewharton.disklrucache.DiskLruCache;
@@ -16,12 +22,20 @@ import com.jakewharton.disklrucache.DiskLruCache;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Created by neuHenry on 2017/10/10.
@@ -29,7 +43,13 @@ import java.security.NoSuchAlgorithmException;
 
 public class ImageLoader {
 
+    private static final String TAG = "ImageLoader";
+
     private static final long DISK_CATCH_SIZE = 1024 * 1024 * 50;
+
+    private static final int TAG_KEY_URL = R.id.imageloader_url;
+
+    private static final int MESSAGE_POST_RESULT = 200;
 
     private Context mContext;
 
@@ -40,6 +60,34 @@ public class ImageLoader {
     private DiskLruCache mDiskLruCache;
 
     private boolean mIsDiskLruCacheCreated = false;
+
+    private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
+
+    private Handler mMainHandler = new Handler(Looper.getMainLooper()) {
+        @Override
+        public void handleMessage(Message msg) {
+            LoaderResult result = (LoaderResult) msg.obj;
+            ImageView imageView = result.imageView;
+            Bitmap bitmap = result.bitmap;
+            String url = (String) imageView.getTag(TAG_KEY_URL);
+            if (url.equals(result.url)) {
+                imageView.setImageBitmap(bitmap);
+            } else {
+                Log.w(TAG, "set image bitmap,but url has changed, ignored!");
+            }
+        }
+    };
+
+    private static final ThreadFactory mThreadFactory = new ThreadFactory() {
+        private final AtomicInteger mCount = new AtomicInteger(1);
+        @Override
+        public Thread newThread(@NonNull Runnable r) {
+            return new Thread(r, "ImageLoader#" + mCount.getAndIncrement());
+        }
+    };
+
+    public static final Executor THREAD_POOL_EXECUTOR = new ThreadPoolExecutor(CPU_COUNT + 1, CPU_COUNT * 2 + 1, 10L,
+            TimeUnit.SECONDS, new LinkedBlockingDeque<Runnable>(), mThreadFactory);
 
     public ImageLoader(Context context) {
         mContext = context;
@@ -59,7 +107,9 @@ public class ImageLoader {
         }
         if (getUsableSpace(diskCacheDir) > DISK_CATCH_SIZE) {
             try {
+                // 创建磁盘缓存，缓存大小为50M
                 mDiskLruCache = DiskLruCache.open(diskCacheDir, getAppVersionCode(mContext), 1, DISK_CATCH_SIZE);
+                // 磁盘缓存已创建 true
                 mIsDiskLruCacheCreated = true;
             } catch (IOException e) {
                 e.printStackTrace();
@@ -85,11 +135,124 @@ public class ImageLoader {
      */
     public void bindBitmap(final String url, final ImageView imageView, final int reqWidth, final int reqHeight) {
         String key = hashKeyForDisk(url);
+        imageView.setTag(TAG_KEY_URL, url);
+        Bitmap bitmap = loadBitmapFromMemCache(url);
+        if (bitmap != null) {
+            imageView.setImageBitmap(bitmap);
+            return;
+        }
+
+        Runnable loadBitmapTask = new Runnable() {
+            @Override
+            public void run() {
+                Bitmap bitmap = loadBitmap(url, reqWidth, reqHeight);
+                if (bitmap != null) {
+                    LoaderResult result = new LoaderResult(imageView, url, bitmap);
+                    mMainHandler.obtainMessage(MESSAGE_POST_RESULT, result).sendToTarget();
+                }
+            }
+        };
+        THREAD_POOL_EXECUTOR.execute(loadBitmapTask);
+    }
+
+    public Bitmap loadBitmap(String url, int reqWidth, int reqHeight) {
+        // 首先在内存缓存中查找，若找到返回
+        Bitmap bitmap = loadBitmapFromMemCache(url);
+        if (bitmap != null) {
+            return bitmap;
+        }
+        // 然后在磁盘缓存中查找，若找到返回
+        bitmap = loadBitmapFromDiskCache(url, reqWidth, reqHeight);
+        if (bitmap != null) {
+            return bitmap;
+        }
+        // 最后去网络中拉取
+        bitmap = loadBitmapFromHttp(url, reqWidth, reqHeight);
+        if (bitmap == null && !mIsDiskLruCacheCreated) {
+            Log.w(TAG, "encounter error, DiskLruCache is not created.");
+            bitmap = downLoadBitmapFromUrl(url);
+        }
+        return bitmap;
+    }
+
+    private Bitmap downLoadBitmapFromUrl(String urlStr) {
+        Bitmap bitmap = null;
+        HttpURLConnection connection = null;
+        BufferedInputStream bis = null;
+        try {
+            final URL url = new URL(urlStr);
+            connection = (HttpURLConnection) url.openConnection();
+            bis = new BufferedInputStream(connection.getInputStream(), 8 * 1024);
+            bitmap = BitmapFactory.decodeStream(bis);
+        } catch (IOException e) {
+            e.printStackTrace();
+            Log.e(TAG, "Error in downloadBitmap:" + e);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+            if (bis != null) {
+                try {
+                    bis.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+        return bitmap;
+    }
+
+    private Bitmap loadBitmapFromHttp(String url, int reqWidth, int reqHeight) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            throw new RuntimeException("can not visit network from UI Thread!");
+        }
+        String key = hashKeyForDisk(url);
         try {
             DiskLruCache.Editor editor = mDiskLruCache.edit(key);
+            if (editor != null) {
+                OutputStream outputStream = editor.newOutputStream(0);
+                if (downLoadUrlToStream(url, outputStream)) {
+                    editor.commit();
+                } else {
+                    editor.abort();
+                }
+                mDiskLruCache.flush();
+            }
         } catch (IOException e) {
             e.printStackTrace();
         }
+        return loadBitmapFromDiskCache(url, reqWidth, reqHeight);
+    }
+
+    private Bitmap loadBitmapFromDiskCache(String url, int reqWidth, int reqHeight) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Log.w(TAG, "load bitmap from UI Thread, it's not recommended!");
+        }
+        if (mDiskLruCache == null) {
+            return null;
+        }
+        Bitmap bitmap = null;
+        String key = hashKeyForDisk(url);
+        try {
+            DiskLruCache.Snapshot snapshot = mDiskLruCache.get(key);
+            if (snapshot != null) {
+                FileInputStream fileInputStream = (FileInputStream) snapshot.getInputStream(0);
+                FileDescriptor fileDescriptor = fileInputStream.getFD();
+                bitmap = mImageResizer.decodeSampledBitmapFromFileDescriptor(fileDescriptor, reqWidth, reqHeight);
+                if (bitmap != null) {
+                    addBitmapToMemoryCache(key, bitmap);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return bitmap;
+    }
+
+    private Bitmap loadBitmapFromMemCache(String url) {
+        final String key = hashKeyForDisk(url);
+        Bitmap bitmap = getBitmapFromMemoryCache(key);
+        return bitmap;
     }
 
     /**
