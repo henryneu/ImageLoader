@@ -90,7 +90,7 @@ public class ImageLoader {
             TimeUnit.SECONDS, new LinkedBlockingDeque<Runnable>(), mThreadFactory);
 
     public ImageLoader(Context context) {
-        mContext = context;
+        mContext = context.getApplicationContext();
         int maxMemory = (int) (Runtime.getRuntime().maxMemory() / 1024);
         int cacheSize = maxMemory / 8;
         // 创建内存缓存，大小为当前进程的可用内存的1/8
@@ -206,6 +206,11 @@ public class ImageLoader {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             throw new RuntimeException("can not visit network from UI Thread!");
         }
+
+        if (mDiskLruCache == null) {
+            return null;
+        }
+
         String key = hashKeyForDisk(url);
         try {
             DiskLruCache.Editor editor = mDiskLruCache.edit(key);

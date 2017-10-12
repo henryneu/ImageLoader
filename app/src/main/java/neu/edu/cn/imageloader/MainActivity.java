@@ -11,6 +11,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.AbsListView;
 import android.widget.BaseAdapter;
 import android.widget.GridView;
 import android.widget.ImageView;
@@ -18,9 +19,11 @@ import android.widget.ImageView;
 import java.util.ArrayList;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements AbsListView.OnScrollListener {
     // 网格布局
     private GridView mGridView;
+
+    private MyGridViewAdapter myGridViewAdapter;
 
     private List<String> mImageUrlList;
 
@@ -38,8 +41,10 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         initData();
         mGridView = (GridView) findViewById(R.id.image_load_view);
-        mGridView.setAdapter(new MyGridViewAdapter());
+        myGridViewAdapter = new MyGridViewAdapter();
+        mGridView.setAdapter(myGridViewAdapter);
         mImageLoader = ImageLoader.build(MainActivity.this);
+        mGridView.setOnScrollListener(this);
     }
 
     /**
@@ -205,5 +210,20 @@ public class MainActivity extends AppCompatActivity {
             return true;
         }
         return false;
+    }
+
+    @Override
+    public void onScrollStateChanged(AbsListView view, int scrollState) {
+        if (scrollState == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) {
+            mIsGridViewIdle = true;
+            myGridViewAdapter.notifyDataSetChanged();
+        } else {
+            mIsGridViewIdle = false;
+        }
+    }
+
+    @Override
+    public void onScroll(AbsListView view, int firstVisibleItem, int visibleItemCount, int totalItemCount) {
+
     }
 }
